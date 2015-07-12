@@ -5,15 +5,15 @@
 </head>
 <body>
 
+Open the JS console
+
 <script src="https://cdn.socket.io/socket.io-1.3.5.js"></script>
 <script>
-  function connect_socket(token) {
-    var s = io.connect('', {
-      query: 'token=' + token
-    });
+  function connect_socket() {
+    var s = io.connect('', {});
 
     s.on('connect', function () {
-      console.log('authenticated', s.id);
+      console.log('connected to socket ID', s.id);
     });
 
     s.on('disconnect', function () {
@@ -23,14 +23,14 @@
     return s
   }
 
-  var socket = connect_socket("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE0MzY5NDgyNjAsInVzZXIiOiJhZG1pbiIsInVzZXJJRCI6MX0.VhSuHwvdzsVIl_MnYTAN8kayexME-Xk9Ea3NAoO7VM4");
+  var socket = connect_socket();
 
   socket.on('currentTime', function(msg) {
     console.log(msg);
   });
 
-  socket.on('hello', function(msg) {
-    console.log('hello', msg);
+  socket.on('token', function(msg) {
+    console.log('auth token received', msg);
   });
 
 </script>
