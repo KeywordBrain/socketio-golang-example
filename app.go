@@ -14,7 +14,7 @@ import (
 
 var (
 	connections = make(map[string]socketio.Socket) // socket ID -> socket
-	sessions    = make(map[socketio.Socket]string) // socket -> session
+	sessions    = make(map[socketio.Socket]string) // socket -> session token
 
 	socketServer *socketio.Server // main connection manager
 )
@@ -73,10 +73,10 @@ func main() {
 
 		// everybody is part of 'all' and anonymous at first
 		so.Join("all")
-		so.Join("anon")
+		so.Join("anonymous")
 
 		// register handlers for different types of messages that clients can send
-		so.On("dataRequest", dataRequest)
+		so.On("graphql", graphQLWSHandler)
 		so.On("login", loginWSHandler)
 
 		// when a client disconnects remove the socket from active sessions
@@ -112,8 +112,17 @@ func main() {
 	log.Fatal(http.ListenAndServe(":5000", nil))
 }
 
-func dataRequest(socket socketio.Socket, msg string) {
-	log.Printf("dataReq for connection %s: %q", socket.Id(), msg)
+func graphQLWSHandler(socket socketio.Socket, msg string) {
+	// check if the current connection is authenticated
+	if _, found := sessions[socket]; !found {
+		log.Printf("conn %s requested stuff but is not authenticated", socket.Id())
+		return
+	}
+
+	log.Printf("GraphQL incoming on conn %s: %q", socket.Id(), msg)
+
+	res := fmt.Sprintf("response for data request: %q", msg)
+	socket.Emit("graphql-response", res)
 }
 
 // this will eventually be done through a GraphQL write
@@ -144,7 +153,7 @@ func loginWSHandler(socket socketio.Socket, msg string) {
 		socket.Emit("token", tokenString)
 
 		// user is no longer anonymous so we switch the room
-		socket.Leave("anon")
+		socket.Leave("anonymous")
 		socket.Join("logged-in")
 
 		return

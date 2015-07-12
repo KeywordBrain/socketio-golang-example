@@ -23,7 +23,15 @@ Open the JS console
     return s
   }
 
+  function sendGraphQLQuery(query) {
+    socket.emit("graphql", JSON.stringify(query))
+  };
+
   var socket = connect_socket();
+
+  socket.on('graphql-response', function(msg) {
+    console.log(msg);
+  });
 
   socket.on('currentTime', function(msg) {
     console.log(msg);
