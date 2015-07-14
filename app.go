@@ -1,28 +1,27 @@
 package main
 
 import (
-	// "errors"
 	"fmt"
-	"log"
 	"net/http"
-	// "net/http/httputil"
-	"time"
 
-	"github.com/dgrijalva/jwt-go"
-	"github.com/googollee/go-socket.io"
+	log "github.com/Sirupsen/logrus"      // fancy logging
+	"github.com/dericofilho/goherokuname" // anonymous usernames
+	"github.com/googollee/go-socket.io"   // websockets
+	"github.com/nu7hatch/gouuid"          // session IDs
 )
 
 var (
-	connections = make(map[string]socketio.Socket) // socket ID -> socket
-	sessions    = make(map[socketio.Socket]string) // socket -> session token
+	sockets  = make(map[socketio.Socket]string) // socket -> session token
+	sessions = make(map[string]string)          // token  -> username
+	// TODO: add storage for token -> list of sockets
 
-	socketServer *socketio.Server // main connection manager
+	socketServer *socketio.Server // websocket connection manager
 )
 
-var signingKey = []byte("dfb943aa439f")
-
 func init() {
-	// start a new socket server and make it available globally
+	log.SetLevel(log.DebugLevel)
+
+	// create a new socket server and make it available globally for config
 	s, err := socketio.NewServer(nil)
 	if err != nil {
 		log.Fatal(err)
@@ -31,67 +30,71 @@ func init() {
 	socketServer = s
 }
 
+// newSession will eventually return a valid session object, but for now
+// it is just a string that represents the session token
+func newSession() string {
+	u, _ := uuid.NewV4()
+	return u.String()
+}
+
+// newUser will eventually return a user object, but for now it is only the username
+func newUser() string {
+	return goherokuname.Haikunate()
+}
+
+// validateSessionToken checks if the token is currently connected to a user
+// and if it is that means it is valid. More sophisticated validations and expiry
+// will follow when I move this to real objects
+func validateSessionToken(token string) (username string, found bool) {
+	username, found = sessions[token]
+	return
+}
+
 func main() {
-	// socketServer.SetAllowRequest(func(req *http.Request) error {
-	// 	req.ParseForm()
-	// 	var userToken = req.Form.Get("token")
-
-	// 	// dump, err := httputil.DumpRequest(req, true)
-	// 	// log.Println(string(dump), err)
-
-	// 	// log.Println("jwt.Parse")
-	// 	token, err := jwt.Parse(
-	// 		userToken,
-	// 		func(token *jwt.Token) (interface{}, error) {
-	// 			// Don't forget to validate the alg is what you expect:
-	// 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-	// 				log.Println("Unexpected signing method", token.Header["alg"])
-	// 				return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
-	// 			}
-	// 			// log.Println("found key", string(signingKey))
-	// 			return signingKey, nil
-	// 		})
-
-	// 	// log.Println("done jwt.Parse")
-
-	// 	if err == nil && token.Valid {
-	// 		return nil
-	// 	}
-	// 	// log.Println("Invalid request")
-
-	// 	return err
-
-	// 	// return errors.New("Invalid token")
-	// })
-
-	// called every time a client connects
 	socketServer.On("connection", func(so socketio.Socket) {
-		log.Println("[*]", so.Id())
-
-		// store the connection ID with the socket
-		connections[so.Id()] = so
-
-		// everybody is part of 'all' and anonymous at first
+		// everyboy joins the main room
 		so.Join("all")
-		so.Join("anonymous")
 
-		// register handlers for different types of messages that clients can send
-		so.On("graphql", graphQLWSHandler)
-		so.On("login", loginWSHandler)
+		// check if the client sent a session token along when connecting,
+		// which means she is most certainly logged in already
+		sessionToken := so.Request().FormValue("token")
 
-		// when a client disconnects remove the socket from active sessions
-		// not sure how to handle clients that disconnect briefly; probably the
-		// session shouldn’t be terminated but on the other hand the connection
-		// is gone and a new one needs to be established.
-		// This is probably the clients job by using the token to connect the socket
-		// and then the server only needs to check it on new connections to not parse
-		// the jwt for every message (or sth like that)
+		log.WithFields(log.Fields{
+			"socket": so.Id(),
+			"token":  sessionToken,
+		}).Debugln("connect")
+
+		// validate the token and generate a new one should it be invalid
+		if user, valid := validateSessionToken(sessionToken); valid {
+			so.Join("logged-in")
+			so.Emit("log", fmt.Sprintf("You are logged in as %q", user))
+
+			// TODO: attach this SOCKET to the already existing SESSION
+
+		} else {
+			// if there was no token sent we generate a new one and
+			// send it back for the client to store for next time
+			sessionToken = newSession()
+			so.Emit("log", fmt.Sprint("new session token: ", sessionToken))
+
+			// add an anonymous user to this session
+			// (this overrides the "" in the 'user' variable returned by session validation)
+			user = newUser()
+			sessions[sessionToken] = user
+
+			so.Emit("log", fmt.Sprintf("Your anonymous user is %s", user))
+
+			so.Join("anon")
+		}
+
+		// associate this socket with the session we just created
+		sockets[so] = sessionToken
+
 		so.On("disconnection", func() {
-			log.Println("[x]", so.Id())
-			delete(connections, so.Id()) // remove from connection pool
-			delete(sessions, so)         // destroy active session, mainly for cleanup
-		})
+			delete(sockets, so) // remove the connection from the pool
 
+			log.WithField("socket", so.Id()).Debugln("disconnect")
+		})
 	})
 
 	// a general socket error occured
@@ -99,94 +102,33 @@ func main() {
 		log.Println("error:", err)
 	})
 
-	// serve the static html
-	http.Handle("/", http.FileServer(http.Dir("./")))
-
-	// serve socket.io at the default path
+	// mount our socket server on the default socket.io path
 	http.Handle("/socket.io/", socketServer)
 
-	http.HandleFunc("/send", sendHandler)
-	http.HandleFunc("/connections", connectionsDebugHandler)
+	http.HandleFunc("/sessions", sessionsDebugHandler)
 
+	// serve the static html (development only)
+	http.Handle("/", http.FileServer(http.Dir("./")))
+
+	// start the server
 	log.Println("Serving at localhost:5000...")
-	log.Fatal(http.ListenAndServe(":5000", nil))
+	log.Fatal(http.ListenAndServe(":5000", nil)) // this is blocking
 }
 
-func graphQLWSHandler(socket socketio.Socket, msg string) {
-	// check if the current connection is authenticated
-	if _, found := sessions[socket]; !found {
-		log.Printf("conn %s requested stuff but is not authenticated", socket.Id())
-		return
+func sessionsDebugHandler(rw http.ResponseWriter, req *http.Request) {
+	// active connections: ID, joined rooms and session token
+	if len(sockets) == 0 {
+		fmt.Fprintln(rw, "Nobody is currently connected :(")
 	}
 
-	log.Printf("GraphQL incoming on conn %s: %q", socket.Id(), msg)
-
-	res := fmt.Sprintf("response for data request: %q", msg)
-	socket.Emit("graphql-response", res)
-}
-
-// this will eventually be done through a GraphQL write
-func loginWSHandler(socket socketio.Socket, msg string) {
-	// validate credentials, just a string with a password for now
-	// this will be parsed from GraphQL later on the main graphql
-	// handler
-
-	// TODO: don’t do this again if socket is currently authenticated
-	log.Printf("Login request on socket %s with creds %q", socket.Id(), msg)
-	if msg == "password" {
-		log.Printf("Successfully authed conn %s for user with secret %s", socket.Id(), msg)
-
-		// generate JWT for client and save to active sessions
-		token := jwt.New(jwt.SigningMethodHS256)
-
-		// Set some claims
-		token.Claims["userID"] = 1
-		token.Claims["exp"] = time.Now().Add(time.Hour * 72).Unix()
-
-		// Sign and get the complete encoded token as a string
-		tokenString, _ := token.SignedString(signingKey)
-
-		// save token to session store
-		sessions[socket] = tokenString
-
-		// send token to client
-		socket.Emit("token", tokenString)
-
-		// user is no longer anonymous so we switch the room
-		socket.Leave("anonymous")
-		socket.Join("logged-in")
-
-		return
+	for socket, sessionToken := range sockets {
+		fmt.Fprintf(rw, "%s\t%q\t%s\n", socket.Id(), socket.Rooms(), sessionToken)
 	}
 
-	log.Println("Login attempt failed")
-}
+	fmt.Fprintln(rw, "")
 
-// broadcasts the current time to all clients
-func sendHandler(rw http.ResponseWriter, req *http.Request) {
-	// req.ParseForm()
-	// key := req.Form.Get("key")
-
-	// so, found := connections[key]
-	// if found == false {
-	// 	fmt.Fprintln(rw, "Socket ID not found")
-	// 	return
-	// }
-
-	msg := fmt.Sprintf("Broadcast! It is currently %s", time.Now())
-	socketServer.BroadcastTo("all", "currentTime", msg)
-
-	// fmt.Fprintln(rw, key)
-	fmt.Fprintln(rw, "Sent current time to all clients")
-}
-
-func connectionsDebugHandler(rw http.ResponseWriter, req *http.Request) {
-	for socketID, socket := range connections {
-		var sessionToken string
-
-		if token, found := sessions[socket]; found {
-			sessionToken = token
-		}
-		fmt.Fprintf(rw, "%s\t%q\t%s\n", socketID, socket.Rooms(), sessionToken)
+	// ALL sessions, connected or not
+	for token, username := range sessions {
+		fmt.Fprintf(rw, "%s\t%q\n", token, username)
 	}
 }

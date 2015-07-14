@@ -9,8 +9,10 @@ Open the JS console
 
 <script src="https://cdn.socket.io/socket.io-1.3.5.js"></script>
 <script>
-  function connect_socket() {
-    var s = io.connect('', {});
+  function connect_socket(token) {
+    var s = io.connect('', {
+      query: 'token=' + token
+    });
 
     s.on('connect', function () {
       console.log('connected to socket ID', s.id);
@@ -23,24 +25,12 @@ Open the JS console
     return s
   }
 
-  function sendGraphQLQuery(query) {
-    socket.emit("graphql", JSON.stringify(query))
-  };
-
+  // this should be called with a session token if available
   var socket = connect_socket();
 
-  socket.on('graphql-response', function(msg) {
+  socket.on('log', function(msg) {
     console.log(msg);
   });
-
-  socket.on('currentTime', function(msg) {
-    console.log(msg);
-  });
-
-  socket.on('token', function(msg) {
-    console.log('auth token received', msg);
-  });
-
 </script>
 
 </body>
